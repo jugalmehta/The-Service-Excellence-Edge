@@ -261,6 +261,8 @@ function wrapLabel(text, maxChars = 16) {
 }
 
 /* ----------------------------- STORAGE ----------------------------- */
+/* Full records (including levels/roles) are stored together in one index key,
+   so the dashboard and result view always have everything they need. */
 const INDEX_KEY = "process-index";
 async function loadIndex() {
   try {
@@ -270,18 +272,6 @@ async function loadIndex() {
 }
 async function saveIndex(list) {
   await window.storage.set(INDEX_KEY, JSON.stringify(list), false);
-}
-async function saveRecord(record) {
-  await window.storage.set(`process-record:${record.id}`, JSON.stringify(record), false);
-}
-async function loadRecord(id) {
-  try {
-    const res = await window.storage.get(`process-record:${id}`, false);
-    return res ? JSON.parse(res.value) : null;
-  } catch { return null; }
-}
-async function deleteRecordStorage(id) {
-  try { await window.storage.delete(`process-record:${id}`, false); } catch {}
 }
 
 /* ----------------------------- SVG PROCESS MAP ----------------------------- */
@@ -455,8 +445,7 @@ export default function ITSMProcessStudio() {
       roles: draft.roles,
       createdAt: new Date().toISOString(),
     };
-    await saveRecord(record);
-    const newIndex = [{ id: record.id, name: record.name, processId: record.processId, createdAt: record.createdAt }, ...records];
+    const newIndex = [record, ...records];
     await saveIndex(newIndex);
     setRecords(newIndex);
     setActiveId(record.id);
@@ -473,7 +462,6 @@ export default function ITSMProcessStudio() {
 
   async function removeRecord(id, e) {
     e.stopPropagation();
-    await deleteRecordStorage(id);
     const newIndex = records.filter((r) => r.id !== id);
     await saveIndex(newIndex);
     setRecords(newIndex);
@@ -547,6 +535,8 @@ export default function ITSMProcessStudio() {
         .back-link { display:flex; align-items:center; gap:6px; color:#5C6B79; font-size:12.5px; cursor:pointer; margin-bottom:16px; font-weight:600; }
         .back-link:hover { color:#1B2430; }
         .empty { text-align:center; padding: 60px 20px; color:#8A97A3; }
+        .spin { animation: spin 0.9s linear infinite; }
+        @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
       `}</style>
 
       <div className="topbar">
