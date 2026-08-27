@@ -1,11 +1,12 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   ChevronRight, ChevronLeft, Check, Plus, ArrowRight, Layers,
-  Users, GitBranch, Table2, ClipboardList, Trash2, Loader2, Sparkles
+  Users, GitBranch, Table2, ClipboardList, Trash2, Loader2, Sparkles,
+  Move, Pencil, RotateCcw
 } from "lucide-react";
 
 /* ----------------------------- DESIGN TOKENS ----------------------------- */
-const FONT_IMPORT = `@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@500;600&family=Inter:wght@400;500;600&display=swap');`;
+const FONT_IMPORT = `@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700;800&family=IBM+Plex+Mono:wght@500;600&family=Inter:wght@400;500;600&display=swap');`;
 
 /* ----------------------------- DOMAIN DATA ----------------------------- */
 const LEVEL_LABELS = [
@@ -19,7 +20,7 @@ const RACI_META = {
   R: { label: "Responsible", color: "#B24A1D" },
   A: { label: "Accountable", color: "#2C5985" },
   C: { label: "Consulted", color: "#6B7A8A" },
-  I: { label: "Informed", color: "#AEB6BE" },
+  I: { label: "Informed", color: "#98A2AB" },
 };
 
 const PROCESSES = {
@@ -248,7 +249,7 @@ function primaryRole(activity, roleCatalog) {
   return r || roleCatalog[0];
 }
 
-function wrapLabel(text, maxChars = 16) {
+function wrapLabel(text, maxChars = 15) {
   const words = text.split(" ");
   const lines = [];
   let cur = "";
@@ -260,9 +261,33 @@ function wrapLabel(text, maxChars = 16) {
   return lines.slice(0, 3);
 }
 
+const NODE_W = 168;
+const NODE_H = 60;
+const LEFT_MARGIN = 240;
+const TOP_MARGIN = 32;
+const LANE_H = 108;
+const COL_W = 220;
+
+function computeDefaultPositions(roleCatalog, activities) {
+  const laneIndex = {};
+  roleCatalog.forEach((r, i) => { laneIndex[r.id] = i; });
+  const out = {};
+  activities.forEach((a, i) => {
+    const role = primaryRole(a, roleCatalog);
+    const lane = laneIndex[role?.id] ?? 0;
+    out[a.id] = {
+      pos: { x: LEFT_MARGIN + i * COL_W + COL_W / 2, y: TOP_MARGIN + lane * LANE_H + LANE_H / 2 },
+      role,
+      code: a.raci[role?.id] || "",
+    };
+  });
+  return out;
+}
+
 /* ----------------------------- STORAGE ----------------------------- */
-/* Full records (including levels/roles) are stored together in one index key,
-   so the dashboard and result view always have everything they need. */
+/* Full records (including levels/roles/layout/names) are stored together in
+   one index key, so the dashboard and result view always have everything
+   they need without extra round trips. */
 const INDEX_KEY = "process-index";
 async function loadIndex() {
   try {
@@ -274,84 +299,135 @@ async function saveIndex(list) {
   await window.storage.set(INDEX_KEY, JSON.stringify(list), false);
 }
 
-/* ----------------------------- SVG PROCESS MAP ----------------------------- */
-function ProcessMapSVG({ roleCatalog, activities }) {
-  const leftMargin = 210;
-  const topMargin = 28;
-  const laneH = 84;
-  const colW = 190;
-  const nodeW = 152;
-  const nodeH = 54;
-  const width = leftMargin + activities.length * colW + 40;
-  const height = topMargin + roleCatalog.length * laneH + 20;
+/* ----------------------------- SVG PROCESS MAP (draggable + renamable) ----------------------------- */
+function ProcessMapSVG({ roleCatalog, activities, layoutOverrides, nameOverrides, onNodeMove, onNodeMoveCommit, onRename }) {
+  const svgRef = useRef(null);
+  const dragRef = useRef(null);
+  const [dragId, setDragId] = useState(null);
 
-  const laneIndex = {};
-  roleCatalog.forEach((r, i) => { laneIndex[r.id] = i; });
+  const basePositions = useMemo(() => computeDefaultPositions(roleCatalog, activities), [roleCatalog, activities]);
 
-  const nodes = activities.map((a, i) => {
-    const role = primaryRole(a, roleCatalog);
-    const lane = laneIndex[role?.id] ?? 0;
-    return {
-      x: leftMargin + i * colW + colW / 2,
-      y: topMargin + lane * laneH + laneH / 2,
-      code: a.raci[role?.id] || "",
-      role,
-      name: a.name,
-      step: i + 1,
+  const positions = useMemo(() => {
+    const merged = {};
+    activities.forEach((a) => {
+      merged[a.id] = layoutOverrides?.[a.id] || basePositions[a.id]?.pos || { x: 0, y: 0 };
+    });
+    return merged;
+  }, [basePositions, layoutOverrides, activities]);
+
+  function clientToSvg(clientX, clientY) {
+    const svg = svgRef.current;
+    if (!svg) return { x: clientX, y: clientY };
+    const pt = svg.createSVGPoint();
+    pt.x = clientX; pt.y = clientY;
+    const ctm = svg.getScreenCTM();
+    if (!ctm) return { x: clientX, y: clientY };
+    const transformed = pt.matrixTransform(ctm.inverse());
+    return { x: transformed.x, y: transformed.y };
+  }
+
+  function handleMouseDown(id, e) {
+    e.preventDefault();
+    const startSvg = clientToSvg(e.clientX, e.clientY);
+    dragRef.current = { id, startSvg, startPos: positions[id] };
+    setDragId(id);
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp);
+  }
+  function handleMouseMove(e) {
+    if (!dragRef.current) return;
+    const cur = clientToSvg(e.clientX, e.clientY);
+    const dx = cur.x - dragRef.current.startSvg.x;
+    const dy = cur.y - dragRef.current.startSvg.y;
+    const newPos = {
+      x: Math.max(NODE_W / 2 + 10, dragRef.current.startPos.x + dx),
+      y: Math.max(NODE_H / 2 + 10, dragRef.current.startPos.y + dy),
     };
-  });
+    onNodeMove(dragRef.current.id, newPos);
+  }
+  function handleMouseUp() {
+    window.removeEventListener("mousemove", handleMouseMove);
+    window.removeEventListener("mouseup", handleMouseUp);
+    if (dragRef.current) onNodeMoveCommit();
+    dragRef.current = null;
+    setDragId(null);
+  }
+  useEffect(() => () => {
+    window.removeEventListener("mousemove", handleMouseMove);
+    window.removeEventListener("mouseup", handleMouseUp);
+  }, []);
+
+  const allX = Object.values(positions).map((p) => p.x);
+  const allY = Object.values(positions).map((p) => p.y);
+  const width = Math.max(LEFT_MARGIN + activities.length * COL_W + 40, Math.max(...allX, 0) + NODE_W / 2 + 60);
+  const laneAreaHeight = TOP_MARGIN + roleCatalog.length * LANE_H + 24;
+  const height = Math.max(laneAreaHeight, Math.max(...allY, 0) + NODE_H / 2 + 40);
 
   return (
-    <svg viewBox={`0 0 ${width} ${height}`} width="100%" style={{ minWidth: width }}>
+    <svg ref={svgRef} viewBox={`0 0 ${width} ${height}`} width="100%" style={{ minWidth: width, display: "block" }}>
       <defs>
         <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-          <path d="M0,0 L10,5 L0,10 z" fill="#8A97A3" />
+          <path d="M0,0 L10,5 L0,10 z" fill="#7C8A96" />
         </marker>
+        <filter id="nodeShadow" x="-40%" y="-40%" width="180%" height="180%">
+          <feDropShadow dx="0" dy="2" stdDeviation="3.2" floodColor="#1B2430" floodOpacity="0.28" />
+        </filter>
       </defs>
 
       {/* lane bands */}
       {roleCatalog.map((r, i) => (
         <g key={r.id}>
-          <rect x="0" y={topMargin + i * laneH} width={width} height={laneH}
-            fill={i % 2 === 0 ? "#FFFFFF" : "#F3F5F6"} />
-          <line x1={leftMargin - 12} y1={topMargin + i * laneH} x2={width} y2={topMargin + i * laneH} stroke="#E4E8EB" strokeWidth="1" />
-          <text x="16" y={topMargin + i * laneH + laneH / 2 - 6} fontFamily="IBM Plex Mono" fontSize="10.5" fill="#5C6B79" fontWeight="600">
-            {r.label.toUpperCase()}
+          <rect x="0" y={TOP_MARGIN + i * LANE_H} width={width} height={LANE_H}
+            fill={i % 2 === 0 ? "#FFFFFF" : "#F4F6F7"} />
+          <line x1={LEFT_MARGIN - 14} y1={TOP_MARGIN + i * LANE_H} x2={width} y2={TOP_MARGIN + i * LANE_H} stroke="#E4E8EB" strokeWidth="1" />
+          <text x="18" y={TOP_MARGIN + i * LANE_H + LANE_H / 2 - 8} fontFamily="IBM Plex Mono" fontSize="12" fill="#3C4A56" fontWeight="600">
+            {r.label.length > 24 ? r.label.slice(0, 23) + "…" : r.label}
           </text>
-          <text x="16" y={topMargin + i * laneH + laneH / 2 + 10} fontFamily="IBM Plex Mono" fontSize="9.5" fill="#B24A1D" fontWeight="600">
+          <text x="18" y={TOP_MARGIN + i * LANE_H + LANE_H / 2 + 12} fontFamily="IBM Plex Mono" fontSize="10.5" fill="#B24A1D" fontWeight="700">
             {r.id}
           </text>
         </g>
       ))}
-      <line x1={leftMargin - 12} y1={topMargin} x2={leftMargin - 12} y2={height - 20} stroke="#C7CDD2" strokeWidth="1.4" />
+      <line x1={LEFT_MARGIN - 14} y1={TOP_MARGIN} x2={LEFT_MARGIN - 14} y2={height - 16} stroke="#C7CDD2" strokeWidth="1.4" />
 
       {/* connectors */}
-      {nodes.slice(1).map((n, i) => {
-        const p = nodes[i];
-        const midX = (p.x + n.x) / 2;
-        const path = p.y === n.y
-          ? `M${p.x + nodeW / 2},${p.y} L${n.x - nodeW / 2},${n.y}`
-          : `M${p.x + nodeW / 2},${p.y} L${midX},${p.y} L${midX},${n.y} L${n.x - nodeW / 2},${n.y}`;
-        return <path key={i} d={path} fill="none" stroke="#8A97A3" strokeWidth="1.6" markerEnd="url(#arrow)" />;
+      {activities.slice(1).map((a, i) => {
+        const p = positions[activities[i].id];
+        const n = positions[a.id];
+        const x1 = p.x + NODE_W / 2, y1 = p.y;
+        const x2 = n.x - NODE_W / 2, y2 = n.y;
+        const midX = (x1 + x2) / 2;
+        const path = `M${x1},${y1} C${midX},${y1} ${midX},${y2} ${x2},${y2}`;
+        return <path key={a.id} d={path} fill="none" stroke="#7C8A96" strokeWidth="1.8" markerEnd="url(#arrow)" />;
       })}
 
       {/* nodes */}
-      {nodes.map((n) => (
-        <g key={n.step}>
-          <rect x={n.x - nodeW / 2} y={n.y - nodeH / 2} width={nodeW} height={nodeH} rx="7"
-            fill="#1B2430" stroke="#1B2430" />
-          <rect x={n.x - nodeW / 2} y={n.y - nodeH / 2} width="26" height={nodeH} rx="7"
-            fill="#2C5985" />
-          <text x={n.x - nodeW / 2 + 13} y={n.y + 4} textAnchor="middle" fontFamily="IBM Plex Mono"
-            fontSize="12" fontWeight="700" fill="#FFFFFF">{n.step}</text>
-          {wrapLabel(n.name, 17).map((line, li, arr) => (
-            <text key={li} x={n.x + 10} y={n.y - ((arr.length - 1) * 6) + li * 12.5}
-              textAnchor="middle" fontFamily="Inter" fontSize="10.5" fontWeight="500" fill="#F3F5F6">
-              {line}
-            </text>
-          ))}
-        </g>
-      ))}
+      {activities.map((a, i) => {
+        const pos = positions[a.id];
+        const base = basePositions[a.id];
+        const displayName = nameOverrides?.[a.id] || a.name;
+        const roleColor = base?.code ? RACI_META[base.code]?.color : "#2C5985";
+        return (
+          <g key={a.id}
+            onMouseDown={(e) => handleMouseDown(a.id, e)}
+            onDoubleClick={() => onRename(a.id, displayName)}
+            style={{ cursor: dragId === a.id ? "grabbing" : "grab" }}>
+            <rect x={pos.x - NODE_W / 2} y={pos.y - NODE_H / 2} width={NODE_W} height={NODE_H} rx="9"
+              fill="#1B2430" filter="url(#nodeShadow)" />
+            <rect x={pos.x - NODE_W / 2} y={pos.y - NODE_H / 2} width="30" height={NODE_H} rx="9"
+              fill={roleColor || "#2C5985"} />
+            <rect x={pos.x - NODE_W / 2 + 15} y={pos.y - NODE_H / 2} width="15" height={NODE_H} fill={roleColor || "#2C5985"} />
+            <text x={pos.x - NODE_W / 2 + 15} y={pos.y + 5} textAnchor="middle" fontFamily="IBM Plex Mono"
+              fontSize="13" fontWeight="700" fill="#FFFFFF">{i + 1}</text>
+            {wrapLabel(displayName, 16).map((line, li, arr) => (
+              <text key={li} x={pos.x + 12} y={pos.y - ((arr.length - 1) * 6.5) + li * 13}
+                textAnchor="middle" fontFamily="Inter" fontSize="11" fontWeight="600" fill="#F3F5F6">
+                {line}
+              </text>
+            ))}
+          </g>
+        );
+      })}
     </svg>
   );
 }
@@ -363,8 +439,9 @@ function Chip({ code }) {
   return (
     <span style={{
       display: "inline-flex", alignItems: "center", justifyContent: "center",
-      width: 26, height: 26, borderRadius: 6, fontFamily: "IBM Plex Mono",
-      fontWeight: 700, fontSize: 12, color: "#fff", background: meta.color,
+      width: 30, height: 30, borderRadius: 7, fontFamily: "IBM Plex Mono",
+      fontWeight: 700, fontSize: 13, color: "#fff", background: meta.color,
+      boxShadow: "0 1px 2px rgba(27,36,48,0.18)",
     }}>{code}</span>
   );
 }
@@ -443,6 +520,8 @@ export default function ITSMProcessStudio() {
       processId: draft.processId,
       levels: draft.levels,
       roles: draft.roles,
+      layout: {},
+      names: {},
       createdAt: new Date().toISOString(),
     };
     const newIndex = [record, ...records];
@@ -467,16 +546,26 @@ export default function ITSMProcessStudio() {
     setRecords(newIndex);
   }
 
+  async function updateRecord(id, patch) {
+    const newIndex = records.map((r) => (r.id === id ? { ...r, ...patch } : r));
+    await saveIndex(newIndex);
+    setRecords(newIndex);
+  }
+
   return (
     <div className="app">
       <style>{`
         ${FONT_IMPORT}
         .app { font-family: 'Inter', sans-serif; background: #EEF1F2; color: #1B2430; min-height: 640px; border-radius: 14px; overflow: hidden; border: 1px solid #DDE2E5; }
-        .topbar { display:flex; align-items:center; gap: 12px; padding: 18px 26px; background:#1B2430; color:#fff; }
-        .topbar .mark { width:30px;height:30px;border-radius:7px;background:#2C5985;display:flex;align-items:center;justify-content:center; }
-        .topbar h1 { font-family:'Space Grotesk',sans-serif; font-size:18px; font-weight:700; letter-spacing:0.2px; margin:0; }
-        .topbar .tag { font-family:'IBM Plex Mono'; font-size:10.5px; color:#9CA9B4; margin-left:2px; }
-        .body { padding: 28px; }
+
+        .hero { background: linear-gradient(135deg, #171E28 0%, #22344A 55%, #2C5985 100%); padding: 40px 24px 34px 24px; text-align: center; position: relative; }
+        .hero-badge { display:inline-flex; align-items:center; gap:7px; background:rgba(255,255,255,0.1); border:1px solid rgba(255,255,255,0.18); color:#CFE0EE; font-family:'IBM Plex Mono'; font-size:10.5px; letter-spacing:1.2px; padding:6px 13px; border-radius:20px; margin-bottom:16px; }
+        .hero-title { font-family:'Space Grotesk',sans-serif; font-weight:800; font-size:40px; letter-spacing:0.2px; color:#fff; margin:0; }
+        .hero-sub { font-family:'Inter'; font-size:14px; color:#B9C7D4; margin:10px auto 0 auto; max-width:520px; }
+        .subnav { display:flex; align-items:center; justify-content:center; gap:8px; background:#151B24; padding:11px 20px; }
+        .subnav .tag { font-family:'IBM Plex Mono'; font-size:10.5px; color:#8598A8; letter-spacing:0.6px; }
+
+        .body { padding: 32px; }
         .grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(230px,1fr)); gap: 14px; }
         .card { background:#fff; border:1px solid #E1E5E8; border-radius:10px; padding:18px; cursor:pointer; transition: all .15s ease; position:relative; }
         .card:hover { border-color:#2C5985; box-shadow: 0 3px 10px rgba(27,36,48,0.08); transform: translateY(-1px); }
@@ -486,64 +575,94 @@ export default function ITSMProcessStudio() {
         .card .pmeta { font-family:'IBM Plex Mono'; font-size:10.5px; color:#7A8896; }
         .new-card { border:1.5px dashed #B7C0C7; background:transparent; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px; color:#5C6B79; font-weight:600; min-height:110px; }
         .new-card:hover { border-color:#2C5985; color:#2C5985; }
-        .section-title { font-family:'Space Grotesk'; font-weight:700; font-size:13px; text-transform:uppercase; letter-spacing:0.6px; color:#5C6B79; margin: 0 0 14px 0; }
-        .interview-wrap { display:flex; gap:28px; }
-        .stepper { width: 190px; flex-shrink:0; }
-        .step-item { display:flex; align-items:center; gap:10px; padding:10px 0; }
-        .step-num { width:24px;height:24px;border-radius:50%; display:flex; align-items:center; justify-content:center; font-family:'IBM Plex Mono'; font-size:11px; font-weight:700; border:1.5px solid #C7CDD2; color:#8A97A3; flex-shrink:0; }
-        .step-item[data-active="true"] .step-num { background:#2C5985; border-color:#2C5985; color:#fff; }
-        .step-item[data-done="true"] .step-num { background:#1B2430; border-color:#1B2430; color:#fff; }
-        .step-label { font-size:13px; font-weight:500; color:#5C6B79; }
-        .step-item[data-active="true"] .step-label { color:#1B2430; font-weight:700; }
-        .step-line { width:1.5px; height:16px; background:#C7CDD2; margin-left:11.5px; }
-        .q-title { font-family:'Space Grotesk'; font-size:22px; font-weight:700; margin: 0 0 4px 0; }
-        .q-sub { color:#5C6B79; font-size:13.5px; margin-bottom:22px; }
-        .opt-list { display:flex; flex-direction:column; gap:9px; max-width:560px; }
-        .opt-card { display:flex; align-items:center; gap:12px; text-align:left; padding:13px 15px; background:#fff; border:1.5px solid #E1E5E8; border-radius:9px; cursor:pointer; font-family:'Inter'; transition: all .12s ease; }
+        .section-title { font-family:'Space Grotesk'; font-weight:700; font-size:13px; text-transform:uppercase; letter-spacing:0.6px; color:#5C6B79; margin: 0 0 14px 0; text-align:center; }
+
+        /* Interview — centered */
+        .hstepper { display:flex; align-items:flex-start; justify-content:center; gap:4px; max-width:640px; margin:0 auto 36px auto; }
+        .hstep { display:flex; flex-direction:column; align-items:center; gap:7px; width:130px; }
+        .hstep-num { width:26px; height:26px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-family:'IBM Plex Mono'; font-size:11.5px; font-weight:700; border:1.5px solid #C7CDD2; color:#8A97A3; background:#fff; flex-shrink:0; }
+        .hstep[data-active="true"] .hstep-num { background:#2C5985; border-color:#2C5985; color:#fff; }
+        .hstep[data-done="true"] .hstep-num { background:#1B2430; border-color:#1B2430; color:#fff; }
+        .hstep-label { font-size:11px; text-align:center; color:#8A97A3; font-weight:500; line-height:1.3; }
+        .hstep[data-active="true"] .hstep-label { color:#1B2430; font-weight:700; }
+        .hstep-line { flex:1; height:1.5px; background:#C7CDD2; margin-top:12px; min-width:20px; }
+        .hstep-line[data-done="true"] { background:#1B2430; }
+
+        .q-col { max-width: 620px; margin: 0 auto; text-align:center; }
+        .q-title { font-family:'Space Grotesk'; font-size:23px; font-weight:700; margin: 0 0 6px 0; }
+        .q-sub { color:#5C6B79; font-size:13.5px; margin-bottom:24px; }
+        .opt-list { display:flex; flex-direction:column; gap:9px; text-align:left; }
+        .opt-card { display:flex; align-items:center; gap:12px; text-align:left; padding:14px 16px; background:#fff; border:1.5px solid #E1E5E8; border-radius:9px; cursor:pointer; font-family:'Inter'; transition: all .12s ease; width:100%; }
         .opt-card:hover { border-color:#8FA6BA; }
         .opt-card[data-selected="true"] { border-color:#2C5985; background:#F0F5F9; }
-        .opt-icon { width:30px;height:30px;border-radius:7px;background:#EEF1F2; display:flex;align-items:center;justify-content:center; color:#2C5985; flex-shrink:0; }
+        .opt-icon { width:32px;height:32px;border-radius:7px;background:#EEF1F2; display:flex;align-items:center;justify-content:center; color:#2C5985; flex-shrink:0; }
         .opt-title { font-weight:600; font-size:13.5px; }
         .opt-sub { font-size:11.5px; color:#7A8896; margin-top:1px; }
-        .role-group { margin-bottom: 20px; }
-        .role-group-label { font-family:'IBM Plex Mono'; font-size:10.5px; color:#8A97A3; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:8px; }
-        .locked-chip { display:inline-flex; align-items:center; gap:6px; background:#1B2430; color:#fff; font-size:12px; font-weight:500; padding:6px 11px; border-radius:20px; margin:0 6px 6px 0; font-family:'IBM Plex Mono'; }
-        .toggle-chip { display:inline-flex; align-items:center; gap:6px; border:1.5px solid #D3D9DD; background:#fff; font-size:12px; font-weight:500; padding:6px 11px; border-radius:20px; margin:0 6px 6px 0; cursor:pointer; }
+        .role-group { margin-bottom: 22px; text-align:center; }
+        .role-group-label { font-family:'IBM Plex Mono'; font-size:10.5px; color:#8A97A3; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:10px; }
+        .locked-chip { display:inline-flex; align-items:center; gap:6px; background:#1B2430; color:#fff; font-size:12px; font-weight:500; padding:7px 12px; border-radius:20px; margin:0 6px 6px 0; font-family:'IBM Plex Mono'; }
+        .toggle-chip { display:inline-flex; align-items:center; gap:6px; border:1.5px solid #D3D9DD; background:#fff; font-size:12px; font-weight:500; padding:7px 12px; border-radius:20px; margin:0 6px 6px 0; cursor:pointer; }
         .toggle-chip[data-on="true"] { border-color:#2C5985; background:#F0F5F9; color:#1B2430; }
-        .nav-row { display:flex; gap:10px; margin-top:24px; }
+        .nav-row { display:flex; gap:10px; margin-top:26px; justify-content:center; }
         .btn { font-family:'Inter'; font-weight:600; font-size:13.5px; padding:10px 18px; border-radius:8px; border:none; cursor:pointer; display:inline-flex; align-items:center; gap:6px; }
         .btn-primary { background:#2C5985; color:#fff; }
         .btn-primary:hover { background:#25496D; }
         .btn-ghost { background:transparent; color:#5C6B79; border:1.5px solid #D3D9DD; }
         .btn-ghost:hover { border-color:#8FA6BA; color:#1B2430; }
-        .result-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:18px; }
-        .result-name { font-family:'Space Grotesk'; font-size:20px; font-weight:700; }
-        .result-goal { color:#5C6B79; font-size:12.5px; max-width:600px; margin-top:2px;}
-        .tabs { display:flex; gap:4px; background:#fff; border:1px solid #E1E5E8; border-radius:9px; padding:4px; width:fit-content; margin-bottom:18px; }
-        .tab { padding:8px 15px; border-radius:6px; font-size:13px; font-weight:600; color:#5C6B79; cursor:pointer; display:flex; align-items:center; gap:6px; }
+        .btn-sm { padding:7px 12px; font-size:12px; }
+        .review-panel { text-align:left; }
+
+        /* Result screen */
+        .result-head { text-align:center; margin-bottom:20px; }
+        .result-name { font-family:'Space Grotesk'; font-size:23px; font-weight:700; }
+        .result-goal { color:#5C6B79; font-size:13px; max-width:600px; margin:6px auto 0 auto;}
+        .tabs { display:flex; gap:4px; background:#fff; border:1px solid #E1E5E8; border-radius:9px; padding:4px; width:fit-content; margin:0 auto 18px auto; }
+        .tab { padding:9px 17px; border-radius:6px; font-size:13px; font-weight:600; color:#5C6B79; cursor:pointer; display:flex; align-items:center; gap:6px; }
         .tab[data-active="true"] { background:#1B2430; color:#fff; }
-        .panel { background:#fff; border:1px solid #E1E5E8; border-radius:12px; padding:22px; overflow-x:auto; }
-        table.sipoc, table.raci { border-collapse: collapse; width:100%; }
-        table.sipoc th { font-family:'IBM Plex Mono'; font-size:10.5px; text-transform:uppercase; letter-spacing:0.5px; color:#fff; background:#1B2430; padding:9px 10px; text-align:left; }
-        table.sipoc td { border:1px solid #E4E8EB; padding:9px 10px; font-size:12.5px; vertical-align:top; }
-        table.sipoc tr:nth-child(even) td { background:#F7F8F9; }
-        table.raci th { font-family:'IBM Plex Mono'; font-size:10px; color:#5C6B79; padding:8px 6px; text-align:center; border-bottom:2px solid #1B2430; white-space:nowrap; }
-        table.raci td { border-bottom:1px solid #E4E8EB; padding:8px 6px; text-align:center; font-size:12.5px; }
-        table.raci td.actname { text-align:left; font-weight:600; font-size:12.5px; padding-right:14px; }
-        .legend { display:flex; gap:14px; margin-top:16px; flex-wrap:wrap; }
-        .legend-item { display:flex; align-items:center; gap:6px; font-size:11.5px; color:#5C6B79; }
-        .back-link { display:flex; align-items:center; gap:6px; color:#5C6B79; font-size:12.5px; cursor:pointer; margin-bottom:16px; font-weight:600; }
+        .panel { background:#fff; border:1px solid #E1E5E8; border-radius:14px; padding:24px; overflow-x:auto; box-shadow: 0 1px 3px rgba(27,36,48,0.05); }
+        .panel-caption { font-family:'IBM Plex Mono'; font-size:11px; color:#8A97A3; margin-bottom:16px; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; }
+
+        table.sipoc { border-collapse: separate; border-spacing:0; width:100%; border-radius:10px; overflow:hidden; border:1px solid #E4E8EB; }
+        table.sipoc th { font-family:'Space Grotesk'; font-size:12.5px; letter-spacing:0.3px; color:#fff; padding:13px 14px; text-align:left; }
+        table.sipoc th:nth-child(1) { background:#1B2430; }
+        table.sipoc th:nth-child(2) { background:#2C5985; }
+        table.sipoc th:nth-child(3) { background:#B24A1D; }
+        table.sipoc th:nth-child(4) { background:#2C5985; }
+        table.sipoc th:nth-child(5) { background:#1B2430; }
+        table.sipoc td { border-bottom:1px solid #EDF0F1; padding:12px 14px; font-size:13px; vertical-align:top; line-height:1.45; }
+        table.sipoc tr:last-child td { border-bottom:none; }
+        table.sipoc tr:nth-child(even) td { background:#F8F9FA; }
+        table.sipoc tr:hover td { background:#F0F5F9; }
+        table.sipoc td:nth-child(3) { font-weight:600; color:#1B2430; }
+
+        table.raci { border-collapse: separate; border-spacing:0; width:100%; }
+        table.raci th { font-family:'IBM Plex Mono'; font-size:10.5px; color:#5C6B79; padding:10px 8px; text-align:center; border-bottom:2.5px solid #1B2430; white-space:nowrap; vertical-align:bottom; }
+        table.raci th:first-child { text-align:left; }
+        table.raci td { border-bottom:1px solid #EDF0F1; padding:10px 8px; text-align:center; font-size:13px; }
+        table.raci tbody tr:hover td { background:#F5F8F9; }
+        table.raci td.actname { text-align:left; font-weight:600; font-size:13px; padding-right:16px; white-space:nowrap; }
+        table.raci td.actname span.num { display:inline-flex; align-items:center; justify-content:center; width:20px; height:20px; border-radius:5px; background:#1B2430; color:#fff; font-family:'IBM Plex Mono'; font-size:10.5px; margin-right:8px; }
+        .legend { display:flex; gap:16px; margin-top:20px; flex-wrap:wrap; border-top:1px solid #EDF0F1; padding-top:16px; }
+        .legend-item { display:flex; align-items:center; gap:7px; font-size:12px; color:#5C6B79; font-weight:500; }
+
+        .map-toolbar { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:14px; flex-wrap:wrap; }
+        .map-hint { display:flex; align-items:center; gap:16px; font-size:11.5px; color:#8A97A3; flex-wrap:wrap; }
+        .map-hint span { display:flex; align-items:center; gap:5px; }
+        .map-scroll { overflow-x:auto; border-radius:10px; }
+
+        .back-link { display:flex; align-items:center; gap:6px; color:#5C6B79; font-size:12.5px; cursor:pointer; margin-bottom:18px; font-weight:600; justify-content:center; }
         .back-link:hover { color:#1B2430; }
         .empty { text-align:center; padding: 60px 20px; color:#8A97A3; }
         .spin { animation: spin 0.9s linear infinite; }
         @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
       `}</style>
 
-      <div className="topbar">
-        <div className="mark"><GitBranch size={16} color="#fff" /></div>
-        <h1>ITSM Process Studio</h1>
-        <span className="tag">PROCESS MAP · SIPOC · RACI</span>
+      <div className="hero">
+        <div className="hero-badge"><GitBranch size={13} /> ITSM PROCESS STUDIO</div>
+        <h1 className="hero-title">Service Excellence Edge</h1>
+        <p className="hero-sub">Answer a short click-through interview and get a process map, SIPOC table and RACI matrix — built to your organization's structure.</p>
       </div>
+      <div className="subnav"><span className="tag">PROCESS MAP · SIPOC · RACI MATRIX</span></div>
 
       <div className="body">
         {view === "loading" && (
@@ -559,7 +678,7 @@ export default function ITSMProcessStudio() {
             step={step} setStep={setStep} draft={draft}
             chooseProcess={chooseProcess} chooseLevels={chooseLevels}
             toggleRole={toggleRole} finishInterview={finishInterview}
-            saving={saving} onCancel={() => setView(records.length ? "dashboard" : "dashboard")}
+            saving={saving} onCancel={() => setView("dashboard")}
           />
         )}
 
@@ -568,6 +687,7 @@ export default function ITSMProcessStudio() {
             record={records.find((r) => r.id === activeId)}
             resultTab={resultTab} setResultTab={setResultTab}
             onBack={() => setView("dashboard")}
+            onUpdateRecord={updateRecord}
           />
         )}
       </div>
@@ -598,7 +718,7 @@ function Dashboard({ records, onOpen, onNew, onDelete }) {
         })}
       </div>
       {records.length === 0 && (
-        <p style={{ color: "#8A97A3", fontSize: 13, marginTop: 12 }}>
+        <p style={{ color: "#8A97A3", fontSize: 13, marginTop: 12, textAlign: "center" }}>
           No processes mapped yet. Start an interview to generate your first process map, SIPOC and RACI matrix.
         </p>
       )}
@@ -614,119 +734,147 @@ function Interview({ step, setStep, draft, chooseProcess, chooseLevels, toggleRo
   const catalog = process ? roleCatalogFor(process, draft.levels) : [];
 
   return (
-    <div className="interview-wrap">
-      <div className="stepper">
+    <div>
+      <span className="back-link" onClick={onCancel}><ChevronLeft size={14} /> Back to dashboard</span>
+
+      <div className="hstepper">
         {STEP_LABELS.map((label, i) => (
           <React.Fragment key={label}>
-            <div className="step-item" data-active={i === step} data-done={i < step}>
-              <div className="step-num">{i < step ? <Check size={12} /> : i + 1}</div>
-              <div className="step-label">{label}</div>
+            <div className="hstep" data-active={i === step} data-done={i < step}>
+              <div className="hstep-num">{i < step ? <Check size={12} /> : i + 1}</div>
+              <div className="hstep-label">{label}</div>
             </div>
-            {i < STEP_LABELS.length - 1 && <div className="step-line" />}
+            {i < STEP_LABELS.length - 1 && <div className="hstep-line" data-done={i < step} />}
           </React.Fragment>
         ))}
-        <div style={{ marginTop: 24 }}>
-          <span className="back-link" onClick={onCancel}><ChevronLeft size={14} /> Back to dashboard</span>
+      </div>
+
+      {step === 0 && (
+        <div className="q-col">
+          <h2 className="q-title">Which ITIL/ITSM process are we mapping?</h2>
+          <p className="q-sub">Pick the process this interview will build a process map, SIPOC table and RACI matrix for.</p>
+          <div className="opt-list">
+            {PROCESS_ORDER.map((pid) => (
+              <OptionCard key={pid} selected={draft.processId === pid} onClick={() => chooseProcess(pid)}
+                title={PROCESSES[pid].name} subtitle={PROCESSES[pid].goal}
+                icon={<Layers size={15} />} />
+            ))}
+          </div>
         </div>
-      </div>
+      )}
 
-      <div style={{ flex: 1 }}>
-        {step === 0 && (
-          <div>
-            <h2 className="q-title">Which ITIL/ITSM process are we mapping?</h2>
-            <p className="q-sub">Pick the process this interview will build a process map, SIPOC table and RACI matrix for.</p>
-            <div className="opt-list">
-              {PROCESS_ORDER.map((pid) => (
-                <OptionCard key={pid} selected={draft.processId === pid} onClick={() => chooseProcess(pid)}
-                  title={PROCESSES[pid].name} subtitle={PROCESSES[pid].goal}
-                  icon={<Layers size={15} />} />
-              ))}
-            </div>
+      {step === 1 && (
+        <div className="q-col">
+          <h2 className="q-title">How many levels of support exist in your organization?</h2>
+          <p className="q-sub">This defines the support lanes used in your process map and RACI matrix.</p>
+          <div className="opt-list">
+            {[1, 2, 3, 4].map((n) => (
+              <OptionCard key={n} selected={draft.levels === n} onClick={() => chooseLevels(n)}
+                title={`${n} Level${n > 1 ? "s" : ""} of Support`}
+                subtitle={LEVEL_LABELS.slice(0, n).join(" → ")}
+                icon={<Layers size={15} />} />
+            ))}
           </div>
-        )}
-
-        {step === 1 && (
-          <div>
-            <h2 className="q-title">How many levels of support exist in your organization?</h2>
-            <p className="q-sub">This defines the support lanes used in your process map and RACI matrix.</p>
-            <div className="opt-list">
-              {[1, 2, 3, 4].map((n) => (
-                <OptionCard key={n} selected={draft.levels === n} onClick={() => chooseLevels(n)}
-                  title={`${n} Level${n > 1 ? "s" : ""} of Support`}
-                  subtitle={LEVEL_LABELS.slice(0, n).join(" → ")}
-                  icon={<Layers size={15} />} />
-              ))}
-            </div>
-            <div className="nav-row">
-              <button className="btn btn-ghost" onClick={() => setStep(0)}><ChevronLeft size={14} /> Back</button>
-            </div>
+          <div className="nav-row">
+            <button className="btn btn-ghost" onClick={() => setStep(0)}><ChevronLeft size={14} /> Back</button>
           </div>
-        )}
+        </div>
+      )}
 
-        {step === 2 && process && (
-          <div>
-            <h2 className="q-title">Which roles are involved in {process.name}?</h2>
-            <p className="q-sub">Support levels and the process owner are always included. Toggle any additional roles present in your organization.</p>
+      {step === 2 && process && (
+        <div className="q-col">
+          <h2 className="q-title">Which roles are involved in {process.name}?</h2>
+          <p className="q-sub">Support levels and the process owner are always included. Toggle any additional roles present in your organization.</p>
 
-            <div className="role-group">
-              <div className="role-group-label">Always included</div>
-              {catalog.filter((r) => r.group !== "extra").map((r) => (
-                <span className="locked-chip" key={r.id}><Check size={11} /> {r.label}</span>
-              ))}
-            </div>
-
-            <div className="role-group">
-              <div className="role-group-label">Additional roles in your organization</div>
-              {catalog.filter((r) => r.group === "extra").map((r) => (
-                <span key={r.id} className="toggle-chip" data-on={draft.roles.includes(r.id)} onClick={() => toggleRole(r.id)}>
-                  {draft.roles.includes(r.id) ? <Check size={11} /> : <Plus size={11} />} {r.label}
-                </span>
-              ))}
-            </div>
-
-            <div className="nav-row">
-              <button className="btn btn-ghost" onClick={() => setStep(1)}><ChevronLeft size={14} /> Back</button>
-              <button className="btn btn-primary" onClick={() => setStep(3)}>Review <ArrowRight size={14} /></button>
-            </div>
+          <div className="role-group">
+            <div className="role-group-label">Always included</div>
+            {catalog.filter((r) => r.group !== "extra").map((r) => (
+              <span className="locked-chip" key={r.id}><Check size={11} /> {r.label}</span>
+            ))}
           </div>
-        )}
 
-        {step === 3 && process && (
-          <div>
-            <h2 className="q-title">Review your inputs</h2>
-            <p className="q-sub">Confirm before generating the process map, SIPOC and RACI matrix.</p>
-            <div className="panel" style={{ maxWidth: 560 }}>
-              <p style={{ fontSize: 13, marginBottom: 10 }}><strong>Process:</strong> {process.name}</p>
-              <p style={{ fontSize: 13, marginBottom: 10 }}><strong>Support levels:</strong> {draft.levels} — {LEVEL_LABELS.slice(0, draft.levels).join(", ")}</p>
-              <p style={{ fontSize: 13, marginBottom: 0 }}><strong>Roles:</strong> {catalog.filter((r) => draft.roles.includes(r.id) || r.group !== "extra").map((r) => r.label).join(", ")}</p>
-            </div>
-            <div className="nav-row">
-              <button className="btn btn-ghost" onClick={() => setStep(2)}><ChevronLeft size={14} /> Back</button>
-              <button className="btn btn-primary" onClick={finishInterview} disabled={saving}>
-                {saving ? <Loader2 size={14} className="spin" /> : <Sparkles size={14} />} Generate outputs
-              </button>
-            </div>
+          <div className="role-group">
+            <div className="role-group-label">Additional roles in your organization</div>
+            {catalog.filter((r) => r.group === "extra").map((r) => (
+              <span key={r.id} className="toggle-chip" data-on={draft.roles.includes(r.id)} onClick={() => toggleRole(r.id)}>
+                {draft.roles.includes(r.id) ? <Check size={11} /> : <Plus size={11} />} {r.label}
+              </span>
+            ))}
           </div>
-        )}
-      </div>
+
+          <div className="nav-row">
+            <button className="btn btn-ghost" onClick={() => setStep(1)}><ChevronLeft size={14} /> Back</button>
+            <button className="btn btn-primary" onClick={() => setStep(3)}>Review <ArrowRight size={14} /></button>
+          </div>
+        </div>
+      )}
+
+      {step === 3 && process && (
+        <div className="q-col">
+          <h2 className="q-title">Review your inputs</h2>
+          <p className="q-sub">Confirm before generating the process map, SIPOC and RACI matrix.</p>
+          <div className="panel review-panel">
+            <p style={{ fontSize: 13, marginBottom: 10 }}><strong>Process:</strong> {process.name}</p>
+            <p style={{ fontSize: 13, marginBottom: 10 }}><strong>Support levels:</strong> {draft.levels} — {LEVEL_LABELS.slice(0, draft.levels).join(", ")}</p>
+            <p style={{ fontSize: 13, marginBottom: 0 }}><strong>Roles:</strong> {catalog.filter((r) => draft.roles.includes(r.id) || r.group !== "extra").map((r) => r.label).join(", ")}</p>
+          </div>
+          <div className="nav-row">
+            <button className="btn btn-ghost" onClick={() => setStep(2)}><ChevronLeft size={14} /> Back</button>
+            <button className="btn btn-primary" onClick={finishInterview} disabled={saving}>
+              {saving ? <Loader2 size={14} className="spin" /> : <Sparkles size={14} />} Generate outputs
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
 /* ----------------------------- RESULT ----------------------------- */
-function Result({ record, resultTab, setResultTab, onBack }) {
+function Result({ record, resultTab, setResultTab, onBack, onUpdateRecord }) {
+  const [layoutOverrides, setLayoutOverrides] = useState(record?.layout || {});
+  const [nameOverrides, setNameOverrides] = useState(record?.names || {});
+
+  useEffect(() => {
+    setLayoutOverrides(record?.layout || {});
+    setNameOverrides(record?.names || {});
+  }, [record?.id]);
+
   if (!record) return null;
   const { process, roleCatalog, activities, sipoc } = useMemo(() => computeOutputs(record), [record]);
+  const displayActivities = activities.map((a) => ({ ...a, name: nameOverrides[a.id] || a.name }));
+
+  function handleNodeMove(id, pos) {
+    setLayoutOverrides((prev) => ({ ...prev, [id]: pos }));
+  }
+  function handleNodeMoveCommit() {
+    setLayoutOverrides((prev) => {
+      onUpdateRecord(record.id, { layout: prev, names: nameOverrides });
+      return prev;
+    });
+  }
+  function handleRename(id, currentName) {
+    const next = typeof window !== "undefined" ? window.prompt("Rename this step", currentName) : null;
+    if (next && next.trim() && next.trim() !== currentName) {
+      setNameOverrides((prev) => {
+        const merged = { ...prev, [id]: next.trim() };
+        onUpdateRecord(record.id, { layout: layoutOverrides, names: merged });
+        return merged;
+      });
+    }
+  }
+  function handleResetLayout() {
+    setLayoutOverrides({});
+    onUpdateRecord(record.id, { layout: {}, names: nameOverrides });
+  }
 
   return (
     <div>
       <span className="back-link" onClick={onBack}><ChevronLeft size={14} /> Back to dashboard</span>
 
       <div className="result-head">
-        <div>
-          <div className="result-name">{record.name}</div>
-          <div className="result-goal">{process.goal}</div>
-        </div>
+        <div className="result-name">{record.name}</div>
+        <div className="result-goal">{process.goal}</div>
       </div>
 
       <div className="tabs">
@@ -737,12 +885,26 @@ function Result({ record, resultTab, setResultTab, onBack }) {
 
       {resultTab === "map" && (
         <div className="panel">
-          <ProcessMapSVG roleCatalog={roleCatalog} activities={activities} />
+          <div className="map-toolbar">
+            <div className="map-hint">
+              <span><Move size={13} /> Drag a step to move it</span>
+              <span><Pencil size={13} /> Double-click a step to rename it</span>
+            </div>
+            <button className="btn btn-ghost btn-sm" onClick={handleResetLayout}><RotateCcw size={13} /> Reset layout</button>
+          </div>
+          <div className="map-scroll">
+            <ProcessMapSVG
+              roleCatalog={roleCatalog} activities={activities}
+              layoutOverrides={layoutOverrides} nameOverrides={nameOverrides}
+              onNodeMove={handleNodeMove} onNodeMoveCommit={handleNodeMoveCommit} onRename={handleRename}
+            />
+          </div>
         </div>
       )}
 
       {resultTab === "sipoc" && (
         <div className="panel">
+          <div className="panel-caption">SIPOC — SUPPLIERS · INPUTS · PROCESS · OUTPUTS · CUSTOMERS</div>
           <table className="sipoc">
             <thead>
               <tr>
@@ -750,11 +912,11 @@ function Result({ record, resultTab, setResultTab, onBack }) {
               </tr>
             </thead>
             <tbody>
-              {Array.from({ length: Math.max(sipoc.suppliers.length, sipoc.inputs.length, activities.length, sipoc.outputs.length, sipoc.customers.length) }).map((_, i) => (
+              {Array.from({ length: Math.max(sipoc.suppliers.length, sipoc.inputs.length, displayActivities.length, sipoc.outputs.length, sipoc.customers.length) }).map((_, i) => (
                 <tr key={i}>
                   <td>{sipoc.suppliers[i] || ""}</td>
                   <td>{sipoc.inputs[i] || ""}</td>
-                  <td>{activities[i] ? `${i + 1}. ${activities[i].name}` : ""}</td>
+                  <td>{displayActivities[i] ? `${i + 1}. ${displayActivities[i].name}` : ""}</td>
                   <td>{sipoc.outputs[i] || ""}</td>
                   <td>{sipoc.customers[i] || ""}</td>
                 </tr>
@@ -766,17 +928,18 @@ function Result({ record, resultTab, setResultTab, onBack }) {
 
       {resultTab === "raci" && (
         <div className="panel">
+          <div className="panel-caption">RACI MATRIX — WHO DOES WHAT</div>
           <table className="raci">
             <thead>
               <tr>
-                <th style={{ textAlign: "left" }}>Activity</th>
+                <th>Activity</th>
                 {roleCatalog.map((r) => <th key={r.id}>{r.label}</th>)}
               </tr>
             </thead>
             <tbody>
-              {activities.map((a, i) => (
+              {displayActivities.map((a, i) => (
                 <tr key={a.id}>
-                  <td className="actname">{i + 1}. {a.name}</td>
+                  <td className="actname"><span className="num">{i + 1}</span>{a.name}</td>
                   {roleCatalog.map((r) => <td key={r.id}><Chip code={a.raci[r.id]} /></td>)}
                 </tr>
               ))}

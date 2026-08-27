@@ -1,14 +1,25 @@
-# ITSM Process Studio — standalone build
+# Service Excellence Edge — ITSM Process Studio (standalone build)
 
-A click-through interview that generates a process map, SIPOC table, and RACI
-matrix for standard ITIL/ITSM processes (Incident, Problem, Change, Request
-Fulfillment, SLA, Knowledge, Release, Asset/Config Management).
+A click-through interview that generates an editable process map, SIPOC
+table, and RACI matrix for standard ITIL/ITSM processes (Incident, Problem,
+Change, Request Fulfillment, SLA, Knowledge, Release, Asset/Config
+Management).
 
 This is the same app you saw as a Claude.ai artifact, packaged as a normal
 Vite + React project so it can be deployed anywhere. The only change: the
 Claude-artifact-only `window.storage` API has been replaced with a
 `localStorage`-backed equivalent in `src/lib/storage.js`, so saved
 interviews persist in the visitor's own browser instead of Claude's backend.
+
+## What's in this version
+
+- Hero banner: "Service Excellence Edge"
+- Interview screens are centered with a horizontal step tracker
+- Process map is interactive: drag any step to reposition it, double-click
+  a step to rename it, and "Reset layout" restores the default swimlane
+  arrangement. Layout and renames are saved per interview.
+- SIPOC and RACI panels use clearer typography, color-coded headers/chips,
+  and row hover states for readability.
 
 ## Run it locally
 
@@ -42,14 +53,15 @@ host. No server/backend is required; everything runs client-side.
 
 ## Notes on data persistence
 
-- Data is stored in the visitor's browser (`localStorage`), scoped to this
-  app. It is **not** shared across devices or browsers, and clearing browser
-  data will remove it.
+- Data (including custom map layouts and renamed steps) is stored in the
+  visitor's browser (`localStorage`), scoped to this app. It is **not**
+  shared across devices or browsers, and clearing browser data will remove
+  it.
 - If you want interviews shared across a team or persisted centrally,
   replace `src/lib/storage.js` with calls to a real backend (e.g. a small
   API + database, Supabase, or Firebase) — the rest of the app only calls
-  `window.storage.get/set/delete/list`, so you only need to change that one
-  file.
+  `window.storage.get/set/delete/list`, so only that one file needs to
+  change.
 
 ## Customizing content
 
