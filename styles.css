@@ -36,8 +36,11 @@ body{
   -webkit-font-smoothing:antialiased;
 }
 
-img{ display:block; max-width:100%; }
-svg{ display:block; width:100%; height:auto; max-width:100%; }
+img{ display:block; max-width:100%; height:auto; }
+/* Safe default: icons are sized like text (1em) unless a more specific
+   rule overrides them. This prevents any icon from ever blowing up to
+   fill its container if it ends up without a dedicated sizing rule. */
+svg{ display:block; width:1em; height:1em; max-width:100%; }
 
 a{ color:inherit; text-decoration:none; }
 
@@ -137,11 +140,13 @@ a:focus-visible, button:focus-visible, input:focus-visible, textarea:focus-visib
 .brand-logo{
   height:32px;
   width:auto;
+  max-width:140px;
   display:block;
 }
 .footer-logo{
   height:38px;
   width:auto;
+  max-width:160px;
   display:block;
   margin-bottom:16px;
 }
