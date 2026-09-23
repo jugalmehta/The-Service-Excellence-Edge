@@ -338,6 +338,22 @@ section + section{ border-top:1px solid var(--hairline); }
   z-index:1;
 }
 
+/* -------------------- Mission / Vision pair -------------------- */
+.mv-grid{
+  display:grid;
+  grid-template-columns:repeat(2,1fr);
+  border-top:1px solid var(--hairline);
+  border-left:1px solid var(--hairline);
+}
+.mv-card{
+  background:var(--white);
+  padding:38px 36px;
+  border-right:1px solid var(--hairline);
+  border-bottom:1px solid var(--hairline);
+}
+.mv-card h3{ font-size:1.15rem; color:var(--navy); margin-bottom:12px; }
+.mv-card p{ font-size:0.95rem; margin-bottom:0; }
+
 /* -------------------- Icon tile grid (services / agents / industries) -------------------- */
 .tile-grid{
   display:grid;
@@ -680,6 +696,7 @@ input:focus, select:focus, textarea:focus{ border-color:var(--sky); }
   .matrix-col{ border-top-width:3px; }
   .matrix-col:not(.is-excellence){ border-bottom:1px solid var(--hairline); }
   .tile-grid{ grid-template-columns:1fr; }
+  .mv-grid{ grid-template-columns:1fr; }
   .process-track{ flex-direction:column; align-items:flex-start; gap:28px; }
   .process-track::before{ display:none; }
   .process-node-wrap{ flex-direction:row; text-align:left; padding:0; gap:18px; }
